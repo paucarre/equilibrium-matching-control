@@ -37,11 +37,12 @@ def main(data_path, rerun_addr, save_only):
         sys.exit(1)
 
     init_state = data["init_state"]  # [1, 5]
-    target_goal = data["target_goal"]  # [1, 3]
     states = data["states"]  # [1, T, 5]
     actions = data["actions"]  # [1, T, 2]
     errors = data["errors"]  # [1, T]
     gt_states = data["gt_states"]
+
+    target_goal = data["target_trajectory"][:, -1, :]  # [1, 3]
 
     # Convert to numpy for Rerun
     gt_states_np = gt_states[0].cpu().numpy()  # [T, 5]

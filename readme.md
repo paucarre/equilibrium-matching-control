@@ -19,7 +19,7 @@ uv venv
 source .venv/bin/activate
 ```
 
-To train
+To train use:
 ```bash
 python control.py
 ```
@@ -29,12 +29,12 @@ Inference:
 python inference.py
 ```
 
-View (rerun) data:
+Generate data for visualization:
 ```bash
-python view.py
+python view.py trajectory_data.pt
 ```
 
-View:
+Visualize data:
 ```bash
 rerun trajectory.rrd
 ```

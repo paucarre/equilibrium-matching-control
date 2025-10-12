@@ -53,7 +53,7 @@ class EqMPolicy(nn.Module):
         self.num_steps = num_steps
         self.total_time = total_time
         self.dt = total_time / num_steps
-        input_dim = 2 + 4 + 2
+        input_dim = 2 + 4 + 2  # speed/steer + rel_pose + action
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.Tanh(),
@@ -64,38 +64,40 @@ class EqMPolicy(nn.Module):
         self.max_accel = 10.0
         self.max_steer = 1.0
 
-    def _relative_pose(self, current_states, target_goals):
-        rel_pos_global = target_goals[:, :2] - current_states[:, :2]
-        rel_heading = target_goals[:, 2] - current_states[:, 2]
-        cos_h, sin_h = torch.cos(current_states[:, 2]), torch.sin(current_states[:, 2])
-        rel_x = rel_pos_global[:, 0] * cos_h + rel_pos_global[:, 1] * sin_h
-        rel_y = -rel_pos_global[:, 0] * sin_h + rel_pos_global[:, 1] * cos_h
+    def _relative_pose(self, states, target_trajectories):
+        # states: (B, T, 5), target_trajectories: (B, T, 5)
+        rel_pos_global = target_trajectories[:, :, :2] - states[:, :, :2]
+        rel_heading = target_trajectories[:, :, 2] - states[:, :, 2]
+        cos_h, sin_h = torch.cos(states[:, :, 2]), torch.sin(states[:, :, 2])
+        rel_x = rel_pos_global[:, :, 0] * cos_h + rel_pos_global[:, :, 1] * sin_h
+        rel_y = -rel_pos_global[:, :, 0] * sin_h + rel_pos_global[:, :, 1] * cos_h
         rel_heading = torch.atan2(torch.sin(rel_heading), torch.cos(rel_heading))
         rel_theta_trig = torch.stack([torch.cos(rel_heading), torch.sin(rel_heading)], dim=-1)
-        return torch.cat([rel_x.unsqueeze(1), rel_y.unsqueeze(1), rel_theta_trig], dim=-1)
+        return torch.cat([rel_x.unsqueeze(-1), rel_y.unsqueeze(-1), rel_theta_trig], dim=-1)  # (B, T, 4)
 
-    def forward(self, current_states, target_goals, actions):
+    def forward(self, states, target_trajectories, actions):
         logger.debug(
-            "Policy forward – current_states: {s}, target_goals: {g}, actions: {a}",
-            s=current_states.shape, g=target_goals.shape, a=actions.shape
+            "Policy forward – states: {s}, target_trajectories: {g}, actions: {a}",
+            s=states.shape, g=target_trajectories.shape, a=actions.shape
         )
-        rel_pose = self._relative_pose(current_states, target_goals)
-        B, T, _ = actions.shape
-        states_expanded = current_states[:, 3:].unsqueeze(1).expand(-1, T, -1)
-        rel_pose_expanded = rel_pose.unsqueeze(1).expand(-1, T, -1)
-        x = torch.cat([states_expanded, rel_pose_expanded, actions], dim=-1)
+        rel_pose = self._relative_pose(states, target_trajectories)
+        states_part = states[:, :, 3:]  # (B, T, 2) speed, steer
+        x = torch.cat([states_part, rel_pose, actions], dim=-1)  # (B, T, 8)
         x_flat = x.view(-1, x.shape[-1])
         grad_flat = self.net(x_flat)
-        grad = grad_flat.view(B, T, 2)
+        grad = grad_flat.view(states.shape[0], states.shape[1], 2)
         grad = torch.clamp(grad, -torch.tensor([self.max_accel, self.max_steer], device=grad.device),
-                          torch.tensor([self.max_accel, self.max_steer], device=grad.device))
+                           torch.tensor([self.max_accel, self.max_steer], device=grad.device))
         return grad
 
-    def simulate_trajectory(self, model, init_states, target_goals, init_actions, steps, step_size):
+    def simulate_trajectory(self, model, init_states, target_trajectories, init_actions, steps, step_size):
         actions = init_actions.clone()
         states = init_states.unsqueeze(1)
+        for t in range(self.num_steps):
+            next_state = model.step(states[:, -1], actions[:, t], dt=self.dt)
+            states = torch.cat([states, next_state.unsqueeze(1)], dim=1)
         for _ in range(steps):
-            grad = self.forward(states[:, -1], target_goals, actions)
+            grad = self.forward(states[:, 1:, :], target_trajectories, actions)  # Use states[:, 1:, :] to match target_trajectories
             actions = actions - step_size * grad
             actions = torch.clamp(
                 actions,
@@ -108,14 +110,29 @@ class EqMPolicy(nn.Module):
                 states = torch.cat([states, next_state.unsqueeze(1)], dim=1)
         return actions, states[:, 1:]
 
-def pose_error_cos_sin(states, goals):
-    pos_error = (states[:, :2] - goals[:, :2]).norm(dim=1)
-    theta = states[:, 2]
-    theta_target = goals[:, 2]
-    cos_diff = torch.cos(theta) * torch.cos(theta_target) + torch.sin(theta) * torch.sin(theta_target)
-    sin_diff = torch.cos(theta) * torch.sin(theta_target) - torch.sin(theta) * torch.cos(theta_target)
-    heading_loss = (1 - cos_diff).pow(2) + sin_diff.pow(2)
-    return pos_error + 0.5 * heading_loss
+def state_error(states, trajectories):
+    # Position error
+    pos_error = torch.norm(states[:, :, :2] - trajectories[:, :, :2], dim=-1).mean(dim=1)
+
+    # Heading error (angular difference using cosine-sine method)
+    theta = states[:, :, 2]
+    theta_target = trajectories[:, :, 2]
+    cos_diff_theta = torch.cos(theta) * torch.cos(theta_target) + torch.sin(theta) * torch.sin(theta_target)
+    sin_diff_theta = torch.cos(theta) * torch.sin(theta_target) - torch.sin(theta) * torch.cos(theta_target)
+    heading_loss = ((1 - cos_diff_theta).pow(2) + sin_diff_theta.pow(2)).mean(dim=1)
+
+    # Steer error (angular difference using cosine-sine method)
+    steer = states[:, :, 4]
+    steer_target = trajectories[:, :, 4]
+    cos_diff_steer = torch.cos(steer) * torch.cos(steer_target) + torch.sin(steer) * torch.sin(steer_target)
+    sin_diff_steer = torch.cos(steer) * torch.sin(steer_target) - torch.sin(steer) * torch.cos(steer_target)
+    steer_loss = ((1 - cos_diff_steer).pow(2) + sin_diff_steer.pow(2)).mean(dim=1)
+
+    # Speed error (numerical difference)
+    speed_error = torch.abs(states[:, :, 3] - trajectories[:, :, 3]).mean(dim=1)
+
+    # Combine all errors with weights
+    return pos_error + 0.5 * heading_loss + 0.5 * steer_loss + speed_error
 
 def sample_maneuver_batch(batch_size, num_steps, total_time, device, mode):
     dt = total_time / num_steps
@@ -128,15 +145,15 @@ def sample_maneuver_batch(batch_size, num_steps, total_time, device, mode):
 
     t = torch.arange(num_steps, device=device).float() / num_steps
 
-    num_cycles_accel = torch.rand((batch_size,), device=device).float()
-    amp_accel = torch.ones(batch_size, device=device) * 10.0
+    num_cycles_accel = (torch.rand((batch_size,), device=device).float() * 0.5) + 0.5
+    amp_accel = (torch.rand(batch_size, device=device) * 5.) + 5.0
     phase_accel = torch.zeros(batch_size, device=device) * 2 * math.pi
     accel = amp_accel.unsqueeze(1) * torch.sin(2 * math.pi * num_cycles_accel.unsqueeze(1) * t + phase_accel.unsqueeze(1))
 
-    num_cycles_steer = torch.rand((batch_size,), device=device).float()
-    amp_steer = torch.ones(batch_size, device=device)
+    num_cycles_steer = (torch.rand((batch_size,), device=device).float() * 0.5) + 0.5
+    amp_steer = (torch.rand(batch_size, device=device) * 0.5) + 0.5
     phase_steer = torch.rand(batch_size, device=device) * 2 * math.pi
-    steer = amp_steer.unsqueeze(1) * torch.sin( ( 2 * math.pi * t * num_cycles_steer.unsqueeze(1)) + phase_steer.unsqueeze(1))
+    steer = amp_steer.unsqueeze(1) * torch.cos((2 * math.pi * t * num_cycles_steer.unsqueeze(1)) + phase_steer.unsqueeze(1))
 
     actions[:, :, 0] = accel
     actions[:, :, 1] = steer
@@ -148,17 +165,18 @@ def sample_maneuver_batch(batch_size, num_steps, total_time, device, mode):
     for s in range(num_steps):
         nxt = model.step(states[:, -1], actions[:, s], dt=dt)
         states = torch.cat([states, nxt.unsqueeze(1)], dim=1)
-        logger.debug("Step {s}: Pos [{px:.3f}, {py:.3f}], Heading {h:.3f}, Steer {st:.3f}",
-                     s=s, px=states[0, -1, 0], py=states[0, -1, 1], h=states[0, -1, 2], st=states[0, -1, 4])
 
-    total_heading_change = (states[:, -1, 2] - states[:, 0, 2]).abs().mean()
+    # Generate full target trajectories based on initial states and actions
+    target_trajectories = states.clone()[:, 1:, :]  # (B, T, 5)
+
     logger.debug("Average total heading change: {thc:.3f} rad ({deg:.1f} deg)",
-                thc=total_heading_change, deg=total_heading_change * 180 / math.pi)
+                 thc=(states[:, -1, 2] - states[:, 0, 2]).abs().mean(),
+                 deg=(states[:, -1, 2] - states[:, 0, 2]).abs().mean() * 180 / math.pi)
 
     if mode is not None:
         logger.warning("Mode ignored; using sinusoidal generation for all.")
 
-    return init, states[:, -1, :3], actions, states
+    return init, target_trajectories, actions, states
 
 def train_controller_eqm(batch_size, num_steps, total_time, epochs, sim_steps, step_size):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -175,12 +193,10 @@ def train_controller_eqm(batch_size, num_steps, total_time, epochs, sim_steps, s
     if os.path.exists(policy_path):
         policy.load_state_dict(torch.load(policy_path, map_location=device))
 
-
-    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=500)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-3)
 
     for ep in range(1, epochs + 1):
-        init_states, goal_poses, target_actions, _ = sample_maneuver_batch(batch_size, num_steps, total_time, device, mode=None)
+        init_states, target_trajectories, target_actions, full_states = sample_maneuver_batch(batch_size, num_steps, total_time, device, mode=None)
 
         gamma = torch.rand(batch_size, 1, device=device)
         noise = torch.randn_like(target_actions) * 0.1
@@ -188,22 +204,23 @@ def train_controller_eqm(batch_size, num_steps, total_time, epochs, sim_steps, s
         c_gamma = 1.0 * (1 - gamma)
         target_grad = (noise - target_actions) * c_gamma.unsqueeze(1)
 
+        # Simulate states with u_gamma
         states = init_states.clone().unsqueeze(1)
-        grad = policy(states[:, -1], goal_poses, u_gamma)
-        eqm_loss = ((grad - target_grad) ** 2).mean()
-
         for s in range(num_steps):
             next_state = model.step(states[:, -1], u_gamma[:, s], dt=dt)
             states = torch.cat([states, next_state.unsqueeze(1)], dim=1)
 
-        actions, pred_states = policy.simulate_trajectory(model, init_states, goal_poses, u_gamma, sim_steps, step_size)
-        pose_loss = pose_error_cos_sin(pred_states[:, -1], goal_poses).mean()
+        # Compute grad using the same time steps as target_trajectories
+        grad = policy(states[:, 1:, :], target_trajectories, u_gamma)
+        eqm_loss = ((grad - target_grad) ** 2).mean()
+
+        actions, pred_states = policy.simulate_trajectory(model, init_states, target_trajectories, u_gamma, sim_steps, step_size)
+        pose_loss = state_error(pred_states, target_trajectories).mean()
 
         loss = eqm_loss + pose_loss
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        scheduler.step(loss)
 
         if ep % 10 == 0 or ep <= 5:
             logger.info(
