@@ -114,7 +114,7 @@ def main(data_path, rerun_addr, save_only):
                 vectors=[direction],   # direction vector for heading
                 colors=[[0, 0, 255]],  # blue arrow for current pose
                 #radii=[0.1],
-                labels=["target_path"]
+                #labels=["target_path"]
             )
         )
 
