@@ -10,7 +10,7 @@ class BicycleModel(nn.Module):
         self.register_buffer("rear_axle_offset_ratio", torch.tensor(rear_axle_offset_ratio))  # Rear axle from rear edge
         self.register_buffer("front_axle_offset_ratio", torch.tensor(front_axle_offset_ratio))  # Front axle from front edge
 
-    def dynamics(self, states, controls):
+    def dynamics(self, states, controls, enabled_trajectories_mask):
         # States: [x, y, speed, heading, length_m, width_m]
         # Controls: [steering_angle, throttle]
         x, y, speed, heading, length_m, width_m = states.unbind(-1)
@@ -24,7 +24,7 @@ class BicycleModel(nn.Module):
 
         # Angular velocity: dheading/dt = (speed / wheelbase) * tan(steer)
         omega = (speed / wheelbase_m) * torch.tan(steer)
-
+        #assert not torch.isnan(omega).any().item()
         # Velocity of car center
         dx = speed * torch.cos(heading) + omega * rear_axle_offset * torch.sin(heading)
         dy = speed * torch.sin(heading) - omega * rear_axle_offset * torch.cos(heading)
@@ -40,14 +40,22 @@ class BicycleModel(nn.Module):
         dlength_m = torch.zeros_like(length_m)
         dwidth_m = torch.zeros_like(width_m)
 
-        return torch.stack([dx, dy, dspeed, dheading, dlength_m, dwidth_m], dim=-1)
+        d_state = torch.stack([dx, dy, dspeed, dheading, dlength_m, dwidth_m], dim=-1)
+        d_state[~enabled_trajectories_mask, :] = 0.
+        assert not torch.isnan(d_state[:, 0]).any().item()
+        assert not torch.isnan(d_state[:, 1]).any().item()
+        assert not torch.isnan(d_state[:, 2]).any().item()
+        assert not torch.isnan(d_state[:, 3]).any().item()
+        assert not torch.isnan(d_state[:, 4]).any().item()
+        assert not torch.isnan(d_state[:, 5]).any().item()
+        return d_state
 
-    def step(self, states, controls, dt):
+    def step(self, states, controls, dt, enabled_trajectories_mask):
         # RK4 integration
-        k1 = self.dynamics(states, controls)
-        k2 = self.dynamics(states + 0.5 * dt * k1, controls)
-        k3 = self.dynamics(states + 0.5 * dt * k2, controls)
-        k4 = self.dynamics(states + dt * k3, controls)
+        k1 = self.dynamics(states, controls, enabled_trajectories_mask)
+        k2 = self.dynamics(states + 0.5 * dt * k1, controls, enabled_trajectories_mask)
+        k3 = self.dynamics(states + 0.5 * dt * k2, controls, enabled_trajectories_mask)
+        k4 = self.dynamics(states + dt * k3, controls, enabled_trajectories_mask)
         return states + dt * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
 
 class EqMPolicy(nn.Module):
@@ -80,10 +88,10 @@ class EqMPolicy(nn.Module):
         return torch.cat([rel_x.unsqueeze(-1), rel_y.unsqueeze(-1), rel_speed.unsqueeze(-1), rel_theta_trig], dim=-1)  # (B, T, 5)
 
     def forward(self, states, target_trajectories, actions):
-        logger.debug(
-            "Policy forward – states: {s}, target_trajectories: {g}, actions: {a}",
-            s=states.shape, g=target_trajectories.shape, a=actions.shape
-        )
+        #logger.debug(
+        #    "Policy forward – states: {s}, target_trajectories: {g}, actions: {a}",
+        #    s=states.shape, g=target_trajectories.shape, a=actions.shape
+        #)
         rel_pose = self._relative_pose(states, target_trajectories)
         x = torch.cat([rel_pose, actions], dim=-1)  # (B, T, 8)
         x_flat = x.view(-1, x.shape[-1])
@@ -94,22 +102,32 @@ class EqMPolicy(nn.Module):
                            torch.tensor([self.max_accel, self.max_steer], device=grad.device))
         return grad
 
-    def simulate_trajectory(self, model, init_states, target_trajectories, init_actions, steps, step_size):
+    def simulate_trajectory(self, model, init_states, target_trajectories, init_actions, steps, step_size, enabled_trajectories_mask):
         actions = init_actions.clone()
         states = init_states.unsqueeze(1)
         for t in range(self.num_steps):
-            next_state = model.step(states[:, -1], actions[:, t], dt=self.dt)
+            assert not torch.isnan(states[:, -1]).any().item()
+            assert not torch.isnan(actions[:, t]).any().item()
+            next_state = model.step(states[:, -1], actions[:, t], dt=self.dt, enabled_trajectories_mask=enabled_trajectories_mask[:, t])
             states = torch.cat([states, next_state.unsqueeze(1)], dim=1)
+            assert not torch.isnan(states).any().item()
         for _ in range(steps):
+            assert not torch.isnan(states[:, 1:, :]).any().item()
+            assert not torch.isnan(target_trajectories).any().item()
+            assert not torch.isnan(actions).any().item()
             grad = self.forward(states[:, 1:, :], target_trajectories, actions)  # Use states[:, 1:, :] to match target_trajectories
+            assert not torch.isnan(grad).any().item()
+            assert not torch.isnan(actions).any().item()
             actions = actions - step_size * grad
             actions = torch.clamp(
                 actions,
                 -torch.tensor([self.max_accel, self.max_steer], device=actions.device),
                 torch.tensor([self.max_accel, self.max_steer], device=actions.device)
             )
+            assert not torch.isnan(actions).any().item()
             states = init_states.unsqueeze(1)
             for t in range(self.num_steps):
-                next_state = model.step(states[:, -1], actions[:, t], dt=self.dt)
+                next_state = model.step(states[:, -1], actions[:, t], dt=self.dt, enabled_trajectories_mask=enabled_trajectories_mask[:, t])
                 states = torch.cat([states, next_state.unsqueeze(1)], dim=1)
+                assert not torch.isnan(states).any().item()
         return actions, states[:, 1:]

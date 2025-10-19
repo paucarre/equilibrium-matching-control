@@ -20,9 +20,14 @@ source .venv/bin/activate
 uv sync
 ```
 
-To train use:
+To train low-level controller use:
 ```bash
-python -m eqmcontrol.train
+python -m eqmcontrol.train --mode next --num-steps 1
+```
+
+To train trajectory controller use:
+```bash
+python -m eqmcontrol.train --mode parking --num-steps 50
 ```
 
 Inference:

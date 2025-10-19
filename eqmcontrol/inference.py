@@ -136,8 +136,8 @@ def run_inference(
 @click.option('--optimization-steps', default=20, type=int, help='Number of optimization steps')
 @click.option('--step-size', default=0.1, type=float, help='Step size for simulation')
 @click.option('--device', default=None, type=str, help='Device to run inference on (e.g., cpu, cuda)')
-@click.option('--model-path', default="bicycle_model.pth", type=str, help='Path to the model file')
-@click.option('--policy-path', default="eqm_policy.pth", type=str, help='Path to the policy file')
+@click.option('--model-path', default="checkpoints/bicycle_model.pth", type=str, help='Path to the model file')
+@click.option('--policy-path', default="checkpoints/eqm_policy.pth", type=str, help='Path to the policy file')
 @click.option('--output-path', default="trajectory_data.pt", type=str, help='Path to save trajectory data')
 def run_inference_cmd(batch_size, num_steps, total_time, optimization_steps, step_size, device, model_path, policy_path, output_path):
     """Run inference with the specified parameters and log results."""
