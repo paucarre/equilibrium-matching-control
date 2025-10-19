@@ -1,0 +1,90 @@
+import torch
+from loguru import logger
+import sys
+import os
+from eqmcontrol.dataset import sample_maneuver_batch
+from eqmcontrol.model import BicycleModel, EqMPolicy
+
+
+def state_error(states, trajectories):
+    # Position error
+    pos_error = torch.norm(states[:, :, :2] - trajectories[:, :, :2], dim=-1).mean(dim=1) / 100.0
+    # Speed error
+    speed_error = torch.abs(states[:, :, 2] - trajectories[:, :, 2]).mean(dim=1)
+    # Heading error (angular difference using cosine-sine method)
+    theta = states[:, :, 3]
+    theta_target = trajectories[:, :, 3]
+    cos_diff_theta = torch.cos(theta) * torch.cos(theta_target) + torch.sin(theta) * torch.sin(theta_target)
+    sin_diff_theta = torch.cos(theta) * torch.sin(theta_target) - torch.sin(theta) * torch.cos(theta_target)
+    heading_loss = ((1 - cos_diff_theta).pow(2) + sin_diff_theta.pow(2)).mean(dim=1)
+
+    # Combine all errors with weights
+    return pos_error + 0.5 * heading_loss + speed_error
+
+
+def train_controller_eqm(batch_size, num_steps, total_time, epochs, sim_steps, step_size):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Running on {device}")
+
+    dt = total_time / num_steps
+    model = BicycleModel(max_steer_rad=1.0).to(device)
+    policy = EqMPolicy(hidden_dim=128, num_steps=num_steps, total_time=total_time).to(device)
+
+    model_path="checkpoints/bicycle_model.pth"
+    if os.path.exists(model_path):
+        model.load_state_dict(torch.load(model_path, map_location=device))
+    policy_path="checkpoints/eqm_policy.pth"
+    if os.path.exists(policy_path):
+        policy.load_state_dict(torch.load(policy_path, map_location=device))
+
+    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4)
+
+    for ep in range(1, epochs + 1):
+        init_states, target_trajectories, target_actions, full_states = sample_maneuver_batch(batch_size, num_steps, total_time, device, mode=None)
+
+        gamma = torch.rand(batch_size, 1, device=device)
+        noise = torch.randn_like(target_actions) * 0.1
+        u_gamma = gamma.unsqueeze(1) * target_actions + (1 - gamma.unsqueeze(1)) * noise
+        c_gamma = 1.0 * (1 - gamma)
+        target_grad = (noise - target_actions) * c_gamma.unsqueeze(1)
+
+        # Simulate states with u_gamma
+        states = init_states.clone().unsqueeze(1)
+        for s in range(num_steps):
+            next_state = model.step(states[:, -1], u_gamma[:, s], dt=dt)
+            states = torch.cat([states, next_state.unsqueeze(1)], dim=1)
+
+        # Compute grad using the same time steps as target_trajectories
+        grad = policy(states[:, 1:, :], target_trajectories, u_gamma)
+        eqm_loss = ((grad - target_grad) ** 2).mean()
+
+        actions, pred_states = policy.simulate_trajectory(model, init_states, target_trajectories, u_gamma, sim_steps, step_size)
+        pose_loss = state_error(pred_states, target_trajectories).mean()
+
+        loss = eqm_loss + pose_loss
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if ep % 10 == 0 or ep <= 5:
+            logger.info(
+                "ep {ep:04d} | loss {l:.4f} | eqm {el:.4f} | pose {pl:.4f}",
+                ep=ep, l=loss.item(), el=eqm_loss.item(), pl=pose_loss.item()
+            )
+            torch.save(model.state_dict(), "checkpoints/bicycle_model.pth")
+            torch.save(policy.state_dict(), "checkpoints/eqm_policy.pth")
+
+    return model, policy
+
+if __name__ == "__main__":
+    logger.remove()
+    logger.add(sys.stderr, level="INFO")
+    #torch.manual_seed(0)
+    model, policy = train_controller_eqm(
+        batch_size=256,
+        num_steps=1,
+        total_time=0.04,
+        epochs=10000,
+        sim_steps=20,
+        step_size=0.1
+    )

@@ -17,21 +17,22 @@ Then sync `uv` project:
 ```bash
 uv venv
 source .venv/bin/activate
+uv sync
 ```
 
 To train use:
 ```bash
-python control.py
+python -m eqmcontrol.train
 ```
 
 Inference:
 ```bash
-python inference.py
+python -m eqmcontrol.inference
 ```
 
 Generate data for visualization:
 ```bash
-python view.py trajectory_data.pt
+python -m eqmcontrol.view trajectory_data.pt
 ```
 
 Visualize data:
