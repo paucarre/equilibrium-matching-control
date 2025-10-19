@@ -1,8 +1,11 @@
+import click
 import torch
 from torch import nn
 from loguru import logger
 import sys
-from control import BicycleModel, EqMPolicy, sample_maneuver_batch, state_error
+from eqmcontrol.train import state_error
+from eqmcontrol.model import BicycleModel, EqMPolicy
+from eqmcontrol.dataset import sample_maneuver_batch
 
 def run_inference(
     batch_size, num_steps, total_time, optimization_steps, step_size, device, model_path, policy_path, output_path
@@ -126,24 +129,36 @@ def run_inference(
 
     return init_state, target_trajectory, actions, states, errors
 
-if __name__ == "__main__":
+@click.command()
+@click.option('--batch-size', default=1, type=int, help='Batch size for inference')
+@click.option('--num-steps', default=75, type=int, help='Number of steps')
+@click.option('--total-time', default=1.0, type=float, help='Total time for simulation')
+@click.option('--optimization-steps', default=20, type=int, help='Number of optimization steps')
+@click.option('--step-size', default=0.1, type=float, help='Step size for simulation')
+@click.option('--device', default=None, type=str, help='Device to run inference on (e.g., cpu, cuda)')
+@click.option('--model-path', default="bicycle_model.pth", type=str, help='Path to the model file')
+@click.option('--policy-path', default="eqm_policy.pth", type=str, help='Path to the policy file')
+@click.option('--output-path', default="trajectory_data.pt", type=str, help='Path to save trajectory data')
+def run_inference_cmd(batch_size, num_steps, total_time, optimization_steps, step_size, device, model_path, policy_path, output_path):
+    """Run inference with the specified parameters and log results."""
     # Set up logging
     logger.remove()
     logger.add(sys.stderr, level="INFO")
 
     # Run inference
     init_state, target_trajectory, actions, states, errors = run_inference(
-        batch_size=1,
-        num_steps=75,
-        total_time=1.0,
-        optimization_steps=20,
-        step_size=0.1,
-        device=None,
-        model_path="bicycle_model.pth",
-        policy_path="eqm_policy.pth",
-        output_path="trajectory_data.pt"
+        batch_size=batch_size,
+        num_steps=num_steps,
+        total_time=total_time,
+        optimization_steps=optimization_steps,
+        step_size=step_size,
+        device=device,
+        model_path=model_path,
+        policy_path=policy_path,
+        output_path=output_path
     )
 
+    # Log results
     logger.info(f"Initial State [px, py, heading, speed, steer]: {init_state.cpu().numpy()}")
     logger.info(f"Target Trajectory shape [px, py, heading]: {target_trajectory.shape}")
     logger.info(f"Actions shape [batch, time, (accel, steer)]: {actions.shape}")
@@ -151,3 +166,6 @@ if __name__ == "__main__":
     logger.info(f"Errors shape [batch, time]: {errors.shape}")
     logger.info(f"Final Simulated State: {states[0, -1].cpu().numpy()}")
     logger.info(f"Final Pose Error: {errors[0, -1].cpu().numpy()}")
+
+if __name__ == "__main__":
+    run_inference_cmd()

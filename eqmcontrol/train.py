@@ -1,3 +1,4 @@
+import click
 import torch
 from loguru import logger
 import sys
@@ -76,15 +77,27 @@ def train_controller_eqm(batch_size, num_steps, total_time, epochs, sim_steps, s
 
     return model, policy
 
-if __name__ == "__main__":
+@click.command()
+@click.option('--batch-size', default=256, type=int, help='Batch size for training')
+@click.option('--num-steps', default=1, type=int, help='Number of steps')
+@click.option('--total-time', default=0.04, type=float, help='Total time for simulation')
+@click.option('--epochs', default=10000, type=int, help='Number of training epochs')
+@click.option('--sim-steps', default=20, type=int, help='Number of simulation steps')
+@click.option('--step-size', default=0.1, type=float, help='Step size for simulation')
+def train(batch_size, num_steps, total_time, epochs, sim_steps, step_size):
+    """Train the controller model with specified parameters."""
     logger.remove()
     logger.add(sys.stderr, level="INFO")
     #torch.manual_seed(0)
     model, policy = train_controller_eqm(
-        batch_size=256,
-        num_steps=1,
-        total_time=0.04,
-        epochs=10000,
-        sim_steps=20,
-        step_size=0.1
+        batch_size=batch_size,
+        num_steps=num_steps,
+        total_time=total_time,
+        epochs=epochs,
+        sim_steps=sim_steps,
+        step_size=step_size
     )
+    return model, policy
+
+if __name__ == "__main__":
+    train()
