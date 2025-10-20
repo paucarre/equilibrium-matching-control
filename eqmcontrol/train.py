@@ -23,7 +23,7 @@ def train_controller_eqm(batch_size, num_steps, mode, dt, epochs, sim_steps, ste
     if os.path.exists(policy_path):
         policy.load_state_dict(torch.load(policy_path, map_location=device))
 
-    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-8)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4)
     assert dt == 0.04
     for ep in range(1, epochs + 1):
         if mode == "next":
@@ -32,8 +32,7 @@ def train_controller_eqm(batch_size, num_steps, mode, dt, epochs, sim_steps, ste
             init_states, target_trajectories, target_actions, _ = sample_parking_batch(batch_size, num_steps, device=device)
 
         enabled_trajectories_mask = target_trajectories[:, :, 4] > 3.
-
-        gamma = torch.rand(batch_size, 1, device=device)
+        gamma = torch.rand(init_states.shape[0], 1, device=device)
         noise = torch.randn_like(target_actions) * 0.1
         u_gamma = gamma.unsqueeze(1) * target_actions + (1 - gamma.unsqueeze(1)) * noise
         c_gamma = 1.0 * (1 - gamma)

@@ -115,7 +115,8 @@ class EqMPolicy(nn.Module):
             assert not torch.isnan(states[:, 1:, :]).any().item()
             assert not torch.isnan(target_trajectories).any().item()
             assert not torch.isnan(actions).any().item()
-            grad = self.forward(states[:, 1:, :], target_trajectories, actions)  # Use states[:, 1:, :] to match target_trajectories
+            grad = self.forward(states[:, 1:, :], target_trajectories, actions) # Use states[:, 1:, :] to match target_trajectories
+            grad[enabled_trajectories_mask, :] = 0.
             assert not torch.isnan(grad).any().item()
             assert not torch.isnan(actions).any().item()
             actions = actions - step_size * grad

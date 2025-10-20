@@ -19,40 +19,51 @@ def sample_parking_batch(batch_size, num_steps, device):
     agent_to_sequence = None
     with open("dataset/agent_to_sequence.pkl", "rb") as f:
         agent_to_sequence = pickle.load(f)
+
+    max_steps = len(next(iter(agent_to_sequence.values())))
+    start_idx = torch.randint(0, max_steps - 1 - num_steps, (1,)).item()
+
+    invalid_tokens = set()
+    for agent_token in agent_to_sequence:
+        values = agent_to_sequence[agent_token][start_idx:start_idx+num_steps]
+        for t, value in enumerate(values):
+            if value is None or value['type'] != 'Car':
+                invalid_tokens.add(agent_token)
+
+    batch_size = min(batch_size, len(set(agent_to_sequence.keys())) - len(invalid_tokens))
+
     action_traj = torch.zeros(batch_size, num_steps - 1, 2, device=device)
     state_traj = torch.zeros(batch_size, num_steps, 6, device=device)
     idx = 0
     optim_steps = 20
     for agent_token in agent_to_sequence:
-        if idx < batch_size:
-            values = agent_to_sequence[agent_token][:num_steps]
-            non_none_cte = sum([1 if value is not None else 0 for value in values])
-            if non_none_cte >= num_steps and values[0]['type'] == 'Car':
-                for t, value in enumerate(values):
-                    #print(value['timestamp'], value['type'], value['size'],
-                    #    value['coords'], value['speed'], value['coords'],
-                    #    value['heading'])
-                    state_traj[idx, t, 0] = value['coords'][0] # X
-                    state_traj[idx, t, 1] = value['coords'][1] # Y
-                    state_traj[idx, t, 2] = value['speed']   # Speed
-                    state_traj[idx, t, 3] = value['heading'] # Heading
-                    state_traj[idx, t, 4] = value['size'][0] # Length_m
-                    state_traj[idx, t, 5] = value['size'][1] # Width_m
-                init_actions = 2. * (torch.rand(batch_size, 1, 2, device=device) - 0.5)
-                for t in range(len(values) - 1):
-                    with torch.no_grad():
-                        actions, states = policy.simulate_trajectory(
-                            model,
-                            state_traj[idx:idx+1, t, :],
-                            state_traj[idx:idx+1, t+1:t+2, :],
-                            init_actions[idx:idx+1, ...],
-                            steps=optim_steps,
-                            step_size=0.1,
-                            enabled_trajectories_mask=torch.ones_like(state_traj[idx:idx+1, t:t+1, 0]== 1.)
-                        )
-                        #assert state_error(states, state_traj[idx:idx+1, t+1:t+2, :]).item() < 1e-2
-                        action_traj[idx, t, :] = actions[0, 0, :]
-                idx += 1
+        if agent_token not in invalid_tokens and idx < batch_size:
+            values = agent_to_sequence[agent_token][start_idx:start_idx+num_steps]
+            for t, value in enumerate(values):
+                #print(value['timestamp'], value['type']
+                state_traj[idx, t, 0] = value['coords'][0] # X
+                state_traj[idx, t, 1] = value['coords'][1] # Y
+                state_traj[idx, t, 2] = value['speed']   # Speed
+                state_traj[idx, t, 3] = value['heading'] # Heading
+                state_traj[idx, t, 4] = value['size'][0] # Length_m
+                state_traj[idx, t, 5] = value['size'][1] # Width_m
+                assert state_traj[idx, t, 4] > 3.0
+                assert state_traj[idx, t, 5] > 1.5
+            init_actions = 2. * (torch.rand(batch_size, 1, 2, device=device) - 0.5)
+            for t in range(len(values) - 1):
+                with torch.no_grad():
+                    actions, states = policy.simulate_trajectory(
+                        model,
+                        state_traj[idx:idx+1, t, :],
+                        state_traj[idx:idx+1, t+1:t+2, :],
+                        init_actions[idx:idx+1, ...],
+                        steps=optim_steps,
+                        step_size=0.1,
+                        enabled_trajectories_mask=torch.ones_like(state_traj[idx:idx+1, t:t+1, 0]== 1.)
+                    )
+                    #assert state_error(states, state_traj[idx:idx+1, t+1:t+2, :]).item() < 1e-2
+                    action_traj[idx, t, :] = actions[0, 0, :]
+            idx += 1
 
     init = state_traj[:, 0, :]
     target_trajectories = state_traj[:, 1:, :]
